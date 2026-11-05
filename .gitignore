@@ -1,0 +1,21 @@
+# Discord Token 與環境變數
+.env
+.env.*
+!.env.example
+
+# 學習紀錄與資料庫備份
+data/
+sync_backups/
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+
+# Python 暫存檔案
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Logs
+*.log
