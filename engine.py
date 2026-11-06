@@ -6,9 +6,11 @@ import json
 import random
 import sqlite3
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from streak_chart import summarize_streaks
 
 TZ = ZoneInfo("Asia/Taipei")
 SKILLS = {"Satzbau", "Kasus", "Verben", "Adjektive", "Praepositionen", "Nebensaetze", "Wortschatz", "Sprechen", "Schreiben", "Lesen", "Hoeren", "Wortbildung"}
@@ -188,6 +190,15 @@ class Engine:
              WHERE user_id=? AND substr(created_at,1,10)=? GROUP BY kind""",(str(user_id),day)).fetchall()
         return {'day':day,'events':sum(r['n'] for r in rows),'xp':sum(r['xp'] for r in rows),
                 'kinds':{r['kind']:r['n'] for r in rows}}
+
+    def streak_stats(self,user_id,today:date|None=None):
+        """Study activity heatmap, derived from saved events (no schema change)."""
+        today=today or datetime.now(TZ).date()
+        rows=self.db.execute("""SELECT substr(created_at,1,10) day,COUNT(*) n
+            FROM activity_log WHERE user_id=? AND substr(created_at,1,10)<=?
+            GROUP BY substr(created_at,1,10)""",(str(user_id),today.isoformat())).fetchall()
+        counts={date.fromisoformat(r['day']):r['n'] for r in rows}
+        return summarize_streaks(counts,today)
 
     def overview(self,user_id):
         p=self.profile(user_id)

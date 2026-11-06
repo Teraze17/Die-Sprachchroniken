@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from engine import CULTURES, SKILLS, Engine, progress_bar
 from local_tts import synthesize_german
 from runtime_config import session_duration_seconds
+from streak_chart import render_streak_png
 from sync_store import MAX_BACKUP_BYTES, SyncError, SyncStore
 
 load_dotenv()
@@ -216,7 +217,7 @@ class QuizResultView(OwnedView):
 
 
 def home_embed(user_id):
-    ov=DB.overview(user_id);p=ov['profile']
+    ov=DB.overview(user_id);p=ov['profile'];streak=DB.streak_stats(user_id)
     xp_level=p['xp']%100
     e=discord.Embed(title="🌞 Die Sprachchroniken — 今日冒險",
         description=f"歡迎回到公會！\n\n**角色等級 Lv.{p['level']}** `{progress_bar(xp_level,100)}` {xp_level}/100 XP\n"
@@ -228,6 +229,7 @@ def home_embed(user_id):
                 f"⚔️ 題庫接觸 {ov['quiz_seen']}/{ov['quiz_total']}｜🌿 收藏 {ov['vocab_total']} 詞",inline=False)
     quiz=DB.quiz_overview(user_id)
     e.add_field(name="🧠 文法題進度",value=f"新題 {quiz['new']}｜到期複習 {quiz['due']}｜尚未到期 {quiz['waiting']}",inline=False)
+    e.add_field(name="🔥 學習連續天數",value=f"目前 **{streak.current_streak} 天**｜歷史最佳 **{streak.max_streak} 天**｜近一年活躍 **{streak.active_days} 天**\n使用 `/de streak` 查看完整熱力圖。",inline=False)
     reminder=DB.reminder_banner(user_id)
     if reminder:e.add_field(name="🔔 每週日記提醒",value=reminder,inline=False)
     e.set_footer(text=f"待 GPT 批改：{p['pending']} 筆｜週日 20:00 台灣時間｜開拓度只代表目前 V1 內容，不是德語程度")
@@ -235,7 +237,7 @@ def home_embed(user_id):
 
 
 def overview_embed(user_id):
-    d=DB.overview(user_id); p=d['profile']
+    d=DB.overview(user_id); p=d['profile']; streak=DB.streak_stats(user_id)
     embed=discord.Embed(title="🏆 帝國開拓總覽",description=(
         f"**Lv.{p['level']} {p['rank']}**  ✨ {p['xp']} XP\n"
         f"等級：`{progress_bar(p['xp']%100,100,18)}` {p['xp']%100}/100\n\n"
@@ -251,8 +253,32 @@ def overview_embed(user_id):
         entries=[v for v in cats if v['category']==category]
         discovered=sum(v['state']>0 for v in entries)
         embed.add_field(name=category,value=f"`{progress_bar(discovered,len(entries))}` {discovered}/{len(entries)}",inline=False)
+    embed.add_field(name="🔥 學習 Streak",value=f"目前 **{streak.current_streak} 天**｜最佳 **{streak.max_streak} 天**｜活躍 **{streak.active_days}/365 天**\n`/de streak` 開啟學習日曆",inline=False)
     embed.set_footer(text="世界開拓度 = 主線完成、文法題接觸、文化探索平均；各自有獨立指標，不代表 CEFR。")
     return embed
+
+
+async def show_streak(interaction,edit=False):
+    stats=DB.streak_stats(uid(interaction))
+    payload=await asyncio.to_thread(render_streak_png,stats)
+    filename="sprachchroniken_streak.png"
+    embed=discord.Embed(title="🔥 學習連續紀錄｜Lernkalender",
+        description=(f"**目前連續：{stats.current_streak} 天**｜歷史最佳：{stats.max_streak} 天\n"
+                     f"近 365 天活躍：**{stats.active_days} 天**｜學習行動：{stats.total_actions} 次\n"
+                     "完成答題、寫日記、收藏單字、回想單字、任務或文化探索等，當天就會亮起一格。"),
+        color=discord.Color.green())
+    embed.set_image(url=f"attachment://{filename}")
+    embed.set_footer(text="使用台灣日期計算；今天尚未學習時，昨天的連續紀錄仍暫時保留。此圖只讀取資料，不會增加 XP。")
+    uploaded=discord.File(io.BytesIO(payload),filename=filename)
+    try:
+        if edit:
+            await interaction.response.edit_message(content=None,embed=embed,
+                view=BackView(interaction.user.id),attachments=[uploaded])
+        else:
+            await interaction.response.send_message(embed=embed,file=uploaded,
+                view=BackView(interaction.user.id),ephemeral=True)
+    finally:
+        uploaded.close()
 
 
 def journal_embed(user_id,day=None):
@@ -331,6 +357,10 @@ class HomeView(OwnedView):
     @discord.ui.button(label="🏆 開拓總覽",style=discord.ButtonStyle.primary,row=3)
     async def overview_button(self,interaction:discord.Interaction,button:discord.ui.Button):
         await interaction.response.edit_message(embed=overview_embed(uid(interaction)),view=BackView(interaction.user.id))
+
+    @discord.ui.button(label="🔥 學習日曆",style=discord.ButtonStyle.success,row=3)
+    async def streak_button(self,interaction:discord.Interaction,button:discord.ui.Button):
+        await show_streak(interaction,edit=True)
 
 
 class JournalView(OwnedView):
@@ -497,7 +527,7 @@ async def start_media(interaction,skill,edit=False):
 class BackView(OwnedView):
     @discord.ui.button(label="⬅️ 返回冒險首頁",style=discord.ButtonStyle.primary)
     async def back(self,interaction:discord.Interaction,button:discord.ui.Button):
-        await interaction.response.edit_message(embed=home_embed(uid(interaction)),view=HomeView(interaction.user.id))
+        await interaction.response.edit_message(embed=home_embed(uid(interaction)),view=HomeView(interaction.user.id),attachments=[])
 
 
 def quest_board_embed(user_id):
@@ -622,7 +652,7 @@ class QuestDetailView(OwnedView):
 @de.command(name="help",description="操作手冊與 ChatGPT Plus 批改流程")
 async def help_cmd(interaction:discord.Interaction):
     listening_help="｜`/de hoeren` Windows 本機德語聽力" if LISTENING_ENABLED else "（雲端版暫停聽力）"
-    await say(interaction,"**📚 Die Sprachchroniken V1.6**\n`/de daily` 冒險首頁｜`/de practice` 文法題（優先新題＋錯題複習）｜`/de quizstats` 查看題庫狀態｜`/de quizhistory` 答題對錯紀錄\n`/de diary` 日記｜`/de vocab add` 單字｜`/de vocab review` 單字回想｜`/de skills` 技能｜`/de quest` 公會任務\n`/de lesen` 閱讀"+listening_help+"｜`/de journal` 今日足跡｜`/de progress` 開拓進度\n`/de review reminder` 開／關週日 20:00 私訊提醒｜`/de review status` 待批改狀態｜`/de review resend` 重送舊批次\n`/de review export` 匯出給 ChatGPT → `/de review import` 上傳回傳檔 → `/de review confirm` 確認寫入。\n`/de sync export` 下載完整進度 → `/de sync import` 上傳另一端進度 → `/de sync confirm` 確認覆蓋。\n"+("`/de shutdown` 僅管理員可用，正常結束本次雲端運作。\n" if OWNER_ID else "")+"**注意**：自由寫作不會立即判分；主線 NPC 回答會記錄，週末再交 GPT 分析。")
+    await say(interaction,"**📚 Die Sprachchroniken V1.7**\n`/de daily` 冒險首頁｜`/de practice` 文法題（優先新題＋錯題複習）｜`/de quizstats` 查看題庫狀態｜`/de quizhistory` 答題對錯紀錄\n`/de diary` 日記｜`/de vocab add` 單字｜`/de vocab review` 單字回想｜`/de skills` 技能｜`/de quest` 公會任務\n`/de lesen` 閱讀"+listening_help+"｜`/de journal` 今日足跡｜`/de progress` 開拓進度｜`/de streak` 學習熱力圖\n`/de review reminder` 開／關週日 20:00 私訊提醒｜`/de review status` 待批改狀態｜`/de review resend` 重送舊批次\n`/de review export` 匯出給 ChatGPT → `/de review import` 上傳回傳檔 → `/de review confirm` 確認寫入。\n`/de sync export` 下載完整進度 → `/de sync import` 上傳另一端進度 → `/de sync confirm` 確認覆蓋。\n"+("`/de shutdown` 僅管理員可用，正常結束本次雲端運作。\n" if OWNER_ID else "")+"**注意**：自由寫作不會立即判分；主線 NPC 回答會記錄，週末再交 GPT 分析。")
 
 
 @de.command(name="diary",description="寫一段德文日記，等待每週批改")
@@ -718,6 +748,11 @@ async def journal(interaction:discord.Interaction,day:str=""):
 @de.command(name="progress",description="查看 XP、主線、文化與文法題的文字進度條")
 async def progress(interaction:discord.Interaction):
     await interaction.response.send_message(embed=overview_embed(uid(interaction)),view=BackView(interaction.user.id),ephemeral=True)
+
+
+@de.command(name="streak",description="查看過去 365 天的學習熱力圖、目前與最佳連續天數")
+async def streak(interaction:discord.Interaction):
+    await show_streak(interaction)
 
 
 @de.command(name="lesen",description="閱讀短篇德文情境並回答理解題")
